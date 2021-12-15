@@ -151,7 +151,7 @@ class AdaptivePadding(nn.Module):
 
 class PatchEmbed(BaseModule):
     """Image to Patch Embedding.
-
+    把图像展开为一维向量
     We use a conv layer to implement PatchEmbed.
 
     Args:
@@ -210,7 +210,8 @@ class PatchEmbed(BaseModule):
         else:
             self.adaptive_padding = None
         padding = to_2tuple(padding)
-
+        
+        # 对channel维度扩增
         self.projection = build_conv_layer(
             dict(type=conv_type),
             in_channels=in_channels,
@@ -339,6 +340,10 @@ class PatchMerging(BaseModule):
             self.adaptive_padding = None
 
         padding = to_2tuple(padding)
+        
+        # 相当于caffe image2col操作
+        # (N, C, *) => (N,C * kernel_size[0] * kernel_size[1], L), 
+        # L跟stride delation等信息相关
         self.sampler = nn.Unfold(
             kernel_size=kernel_size,
             dilation=dilation,
@@ -405,13 +410,14 @@ class PatchMerging(BaseModule):
 @ATTENTION.register_module()
 class MultiheadAttention(BaseModule):
     """A wrapper for ``torch.nn.MultiheadAttention``.
-
+    在pytorch基础上添加了dropout后处理等小的功能
     This module implements MultiheadAttention with identity connection,
     and positional encoding  is also passed as input.
 
     Args:
         embed_dims (int): The embedding dimension.
         num_heads (int): Parallel attention heads.
+        nn.
         attn_drop (float): A Dropout layer on attn_output_weights.
             Default: 0.0.
         proj_drop (float): A Dropout layer after `nn.MultiheadAttention`.
@@ -446,7 +452,8 @@ class MultiheadAttention(BaseModule):
         self.embed_dims = embed_dims
         self.num_heads = num_heads
         self.batch_first = batch_first
-
+        
+        
         self.attn = nn.MultiheadAttention(embed_dims, num_heads, attn_drop,
                                           **kwargs)
 
