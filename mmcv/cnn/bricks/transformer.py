@@ -61,7 +61,7 @@ def build_transformer_layer_sequence(cfg, default_args=None):
 
 class AdaptivePadding(nn.Module):
     """Applies padding adaptively to the input.
-
+    自动计算padding数目，取决于kernerl、stride等参数
     This module can make input get fully covered by filter
     you specified. It support two modes "same" and "corner". The
     "same" mode is same with "SAME" padding mode in TensorFlow, pad
@@ -97,7 +97,7 @@ class AdaptivePadding(nn.Module):
     def __init__(self, kernel_size=1, stride=1, dilation=1, padding='corner'):
         super(AdaptivePadding, self).__init__()
         assert padding in ('same', 'corner')
-
+        # 参数必须是(x, y) tuple的形式
         kernel_size = to_2tuple(kernel_size)
         stride = to_2tuple(stride)
         dilation = to_2tuple(dilation)
@@ -130,7 +130,7 @@ class AdaptivePadding(nn.Module):
 
     def forward(self, x):
         """Add padding to `x`
-
+        
         Args:
             x (Tensor): Input tensor has shape (B, C, H, W).
 
@@ -211,7 +211,7 @@ class PatchEmbed(BaseModule):
             self.adaptive_padding = None
         padding = to_2tuple(padding)
         
-        # 对channel维度扩增
+        # 对channel维度扩增，通过卷积完成
         self.projection = build_conv_layer(
             dict(type=conv_type),
             in_channels=in_channels,
@@ -238,7 +238,7 @@ class PatchEmbed(BaseModule):
                 input_h, input_w = input_size
                 input_h = input_h + pad_h
                 input_w = input_w + pad_w
-                input_size = (input_h, input_w)
+                input_size = (input_h, input_w) # 考虑padding后的维度
 
             # https://pytorch.org/docs/stable/generated/torch.nn.Conv2d.html
             h_out = (input_size[0] + 2 * padding[0] - dilation[0] *
@@ -262,12 +262,18 @@ class PatchEmbed(BaseModule):
             - out_size (tuple[int]): Spatial shape of x, arrange as
               (out_h, out_w).
         """
-
+        # padding + conv
         if self.adaptive_padding:
             x = self.adaptive_padding(x)
-
         x = self.projection(x)
+        
         out_size = (x.shape[2], x.shape[3])
+        
+        # (B, embed_dims, out_h, out_w) => (B, embed_dims, out_h * out_w) 
+        # => (B, out_h * out_w, embed_dims)
+        # transformer之前向量都要展开，为了每个pixel的相互关系时防止维度过于复杂
+        # 一维向量channel last，二维image，tensor channel first
+        
         x = x.flatten(2).transpose(1, 2)
         if self.norm is not None:
             x = self.norm(x)
@@ -327,7 +333,7 @@ class PatchMerging(BaseModule):
         kernel_size = to_2tuple(kernel_size)
         stride = to_2tuple(stride)
         dilation = to_2tuple(dilation)
-
+        
         if isinstance(padding, str):
             self.adaptive_padding = AdaptivePadding(
                 kernel_size=kernel_size,
@@ -349,7 +355,8 @@ class PatchMerging(BaseModule):
             dilation=dilation,
             padding=padding,
             stride=stride)
-
+        
+        # image2col每一个卷积单元的维度
         sample_dim = kernel_size[0] * kernel_size[1] * in_channels
 
         if norm_cfg is not None:
@@ -381,7 +388,8 @@ class PatchMerging(BaseModule):
 
         H, W = input_size
         assert L == H * W, 'input feature has wrong size'
-
+        
+        # 卷积需要channel first
         x = x.view(B, H, W, C).permute([0, 3, 1, 2])  # B, C, H, W
 
         if self.adaptive_padding:
@@ -410,7 +418,10 @@ class PatchMerging(BaseModule):
 @ATTENTION.register_module()
 class MultiheadAttention(BaseModule):
     """A wrapper for ``torch.nn.MultiheadAttention``.
-    在pytorch基础上添加了dropout后处理等小的功能
+    
+    在pytorch nn.MultiheadAttention基础上做的
+    MultiheadAttention是描述相关性的，完整的transformer还有其他的模块
+    
     This module implements MultiheadAttention with identity connection,
     and positional encoding  is also passed as input.
 
@@ -453,10 +464,11 @@ class MultiheadAttention(BaseModule):
         self.num_heads = num_heads
         self.batch_first = batch_first
         
-        
+        # MultiHead(Q,K,V)=Concat(head1,…,headh)Wo, 多个相关性描述融合
+        # Wo就是需要drop的位置，防止某一head过拟合
         self.attn = nn.MultiheadAttention(embed_dims, num_heads, attn_drop,
                                           **kwargs)
-
+        # 结果出来之后conv projection的dropout
         self.proj_drop = nn.Dropout(proj_drop)
         self.dropout_layer = build_dropout(
             dropout_layer) if dropout_layer else nn.Identity()
@@ -512,11 +524,13 @@ class MultiheadAttention(BaseModule):
             if self.batch_first is False, else
             [bs, num_queries embed_dims].
         """
-
+        # 如果没key，就是自相关
         if key is None:
             key = query
+        # 如果没有val，默认直接key
         if value is None:
             value = key
+        #？？？？
         if identity is None:
             identity = query
         if key_pos is None:
@@ -527,6 +541,7 @@ class MultiheadAttention(BaseModule):
                 else:
                     warnings.warn(f'position encoding of key is'
                                   f'missing in {self.__class__.__name__}.')
+        # 有pos encoding直接加上去。。。这么粗暴。。。
         if query_pos is not None:
             query = query + query_pos
         if key_pos is not None:
@@ -552,7 +567,8 @@ class MultiheadAttention(BaseModule):
 
         if self.batch_first:
             out = out.transpose(0, 1)
-
+        
+        # layer skipping
         return identity + self.dropout_layer(self.proj_drop(out))
 
 
@@ -681,7 +697,7 @@ class BaseTransformerLayer(BaseModule):
                      act_cfg=dict(type='ReLU', inplace=True),
                  ),
                  operation_order=None,
-                 norm_cfg=dict(type='LN'),
+                 norm_cfg=dict(type='LN'), # RNN中作用明显
                  init_cfg=None,
                  batch_first=False,
                  **kwargs):
@@ -823,6 +839,8 @@ class BaseTransformerLayer(BaseModule):
                         f'operation_order {self.num_attn}'
 
         for layer in self.operation_order:
+            # 通过multiheadattention等算子搭配实现self和cross attention
+            # self attention就是query自己跟自己玩
             if layer == 'self_attn':
                 temp_key = temp_value = query
                 query = self.attentions[attn_index](
@@ -843,6 +861,8 @@ class BaseTransformerLayer(BaseModule):
                 norm_index += 1
 
             elif layer == 'cross_attn':
+                # cross attention query key不一样
+                # key和val一般一样
                 query = self.attentions[attn_index](
                     query,
                     key,
@@ -936,6 +956,7 @@ class TransformerLayerSequence(BaseModule):
             Tensor:  results with shape [num_queries, bs, embed_dims].
         """
         for layer in self.layers:
+            # 重复做transformer
             query = layer(
                 query,
                 key,
